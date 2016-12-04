@@ -1,0 +1,5 @@
+message Request{
+  required string type = 1;
+  required string key = 2;
+  optional string val = 3;
+}

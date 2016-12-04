@@ -5,7 +5,8 @@
   {mod, { edht_app, []}},
   {applications,
    [kernel,
-    stdlib
+    stdlib,
+    protobuffs
    ]},
   {env,[]},
   {modules, []},
