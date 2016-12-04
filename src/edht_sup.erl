@@ -30,7 +30,6 @@ start_link() ->
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
     io:format('Starting EDHT~n'),
-    io:format("~p~n", [protobuffs:encode(1, 1, uint32)]),
     protobuffs_compile:scan_file("src/request.proto"),
     Port = get_port(),
     listen_to_clients(Port),
@@ -96,4 +95,3 @@ client(Method, Key, Value) ->
     gen_udp:send(Socket, {127,0,0,1}, 4545, request_pb:encode(
                                               {request, Method, Key, Value})),
     gen_udp:close(Socket).
-       
