@@ -6,7 +6,8 @@
   {applications,
    [kernel,
     stdlib,
-    protobuffs
+    protobuffs,
+    bitcask
    ]},
   {env,[]},
   {modules, []},
