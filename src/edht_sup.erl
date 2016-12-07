@@ -4,7 +4,6 @@
 %%%-------------------------------------------------------------------
 
 -module(edht_sup).
-
 -behaviour(supervisor).
 
 %% API
@@ -118,9 +117,47 @@ handle_put(Socket, Host, Port, Key, Value) ->
             io:format("error: Key: ~p, Value: ~p ~n", [Key, Value])
     end.
 
+successor(Ring, Key, Length) ->
+    Members = concha:members(Ring),
+    Node = concha:lookup(Key, Ring),
+    StartIndex = index_of(Node, Members),
+    DoubleList = lists:append(Members, Members),
+    lists:sublist(DoubleList, StartIndex, Length).
+
+index_of(Value, List) ->
+    Map = lists:zip(List, lists:seq(1, length(List))),
+    case lists:keyfind(Value, 1, Map) of
+        {Value, Index} -> Index;
+        false -> notfound
+    end.
+
 
 client(Method, Key, Value) ->
     {ok, Socket} = gen_udp:open(8888),
     gen_udp:send(Socket, {127,0,0,1}, 4545, request_pb:encode(
                                               {request, Method, Key, Value})),
     gen_udp:close(Socket).
+
+%%====================================================================
+%% Private tests
+%%====================================================================
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+index_of_empty_test() ->
+    % empty list
+    ?assertEqual(notfound, index_of(2, [])).
+
+index_of_notfound_test() ->
+    % element not in list
+    ?assertEqual(notfound, index_of(10, [1, 2])).
+
+index_of_member_test() ->
+    % element is in list
+    ?assertEqual(1, index_of(3, [3, 2, 1])).
+
+successor_test() ->
+    R = concha:new([1, 2, 3, 4]),
+    ?assertEqual([2, 3, 4], edht_sup:successor(R, 2, 3)).
+
+-endif.
