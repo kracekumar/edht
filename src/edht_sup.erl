@@ -8,7 +8,7 @@
 
 %% API
 -export([start_link/0]).
--export([client/3]).
+-export([client/3, successor/3]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -118,8 +118,11 @@ handle_put(Socket, Host, Port, Key, Value) ->
     end.
 
 successor(Ring, Key, Length) ->
-    Members = concha:members(Ring),
     Node = concha:lookup(Key, Ring),
+    fetch_n_nodes(Node, Ring, Length).
+
+fetch_n_nodes(Node, Ring, Length) ->
+    Members = concha:members(Ring),
     StartIndex = index_of(Node, Members),
     DoubleList = lists:append(Members, Members),
     lists:sublist(DoubleList, StartIndex, Length).
@@ -158,6 +161,9 @@ index_of_member_test() ->
 
 successor_test() ->
     R = concha:new([1, 2, 3, 4]),
-    ?assertEqual([2, 3, 4], edht_sup:successor(R, 2, 3)).
+    ?assertEqual(3, length(edht_sup:successor(R, "geoff", 3))).
 
+fetch_n_nodes_test() ->
+    R = concha:new([1, 2, 3, 4]),
+    ?assertEqual([2, 3, 4], fetch_n_nodes(2, R, 3)).
 -endif.
