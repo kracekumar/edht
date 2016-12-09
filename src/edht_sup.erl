@@ -30,8 +30,8 @@ start_link() ->
 init([]) ->
     io:format('Starting EDHT~n'),
     protobuffs_compile:scan_file("src/request.proto"),
-    Port = get_port(),
-    listen_to_clients(Port),
+    %Config = read_config(),
+    start_procs(4545),
     {ok, { {one_for_all, 0, 1}, []} }.
 
 %%====================================================================
@@ -39,20 +39,37 @@ init([]) ->
 %%====================================================================
 -define(DATADIR, ".bitcaskdata").
 
+
+start_procs(Port) ->
+    listen_to_clients(Port).
+
+read_config() ->
+    application:ensure_all_started(econfig),
+    econfig:register_config(config, ["config.ini"]),
+    econfig:get_value(config, "default").
+
 open_store() ->
     bitcask:open(?DATADIR, [read_write]).
-
-get_port() ->
-    case os:getenv("PORT") of
-        false ->
-            4545;
-        Value -> list_to_integer(Value)
-    end.
 
 
 listen_to_clients(Port) ->
     %% Listen to all UDP clients.
     spawn_link(fun() -> handle_client_connections(Port) end).
+
+listen_to_nodes(Port) ->
+    {ok, Socket} = gen_udp:open(Port, [binary, {active, false}]),
+    io:format("Listening to port ~p~n", [Port]),
+    node_loop(Socket).
+
+
+node_loop(Socket) ->
+    inet:setopts(Socket, [{active, once}]),
+
+    receive
+        {udp, Socket, Host, Port, Bin} ->
+            io:format("Received data `~p` `~p` from `~p`~n", [Host, Port, Bin]),
+            node_loop(Socket)
+    end.
 
 
 handle_client_connections(Port) ->
