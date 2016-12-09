@@ -30,8 +30,9 @@ start_link() ->
 init([]) ->
     io:format('Starting EDHT~n'),
     protobuffs_compile:scan_file("src/request.proto"),
-    %Config = read_config(),
-    start_procs(4545),
+    Config = read_config(),
+    Port = get_config_value(Config, "client_port"),
+    start_procs(Port),
     {ok, { {one_for_all, 0, 1}, []} }.
 
 %%====================================================================
@@ -43,10 +44,19 @@ init([]) ->
 start_procs(Port) ->
     listen_to_clients(Port).
 
+get_config_value(Config, Key) ->
+    [H | T] = Config,
+    {K, V} = H,
+    if 
+        K =:= Key -> V;
+        false -> get_config_value(T, Key)
+    end.
+
 read_config() ->
     application:ensure_all_started(econfig),
-    econfig:register_config(config, ["config.ini"]),
-    econfig:get_value(config, "default").
+    File = os:getenv("CONFIG_FILE"),
+    econfig:register_config(config, [File]),
+    econfig:get_value(config, "DEFAULT").
 
 open_store() ->
     bitcask:open(?DATADIR, [read_write]).
