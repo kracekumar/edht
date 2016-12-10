@@ -46,46 +46,43 @@ init([]) ->
 
 local_io(Ref) ->
     receive
-        {child, RequestCounter, Op, Key, Val} ->
-            io:format('Sending data after lookup ~p, ~p, ~p~n', [Op, Key, Val]),
-            io:format('Ref: ~p~n', [Ref]),
-            Ref ! {arbiter, RequestCounter, Op, Key, Val},
-            local_io(Ref);
         {Caller, RequestCounter, Op, Key, Val} ->
             io:format('Received data for lookup ~p, ~p, ~p~n', [Op, Key, Val]),
             Parent = self(),
             spawn_link(fun() -> handle_io(Parent, RequestCounter, Op, Key, Val) end),
             local_io(Caller);
+        {RequestCounter, Op, Key, Val} ->
+            io:format('Sending data after lookup ~p, ~p, ~p~n', [Op, Key, Val]),
+            Ref ! {arbiter, RequestCounter, Op, Key, Val},
+            local_io(Ref);
         Pat -> io:format("failed the pattern, ~p ~n", [Pat])
-
         end.
 
 handle_io(Parent, RequestCounter, Op, Key, Val) ->
-    %% DBHandle = open_store(),
+    DBHandle = open_store(),
     BinaryKey = to_binary(Key),
     BinaryVal = to_binary(Val),
-    Parent ! {child, RequestCounter, Op, Key, Val}.
-    %% if 
-    %%     Op =:= "GET" ->
-    %%         case bitcask:get(DBHandle, BinaryKey) of
-    %%             {ok, Value} ->
-    %%                 io:format("Handle io Key: ~p Value: ~p~n", [Key, Value]),
-    %%                 Parent ! {child, RequestCounter, Op, Key, Value};
-    %%             not_found ->
-    %%                 io:format("Handle ioKey: ~p Value: ~p~n", [Key, not_found]),
-    %%                 Parent ! {child, RequestCounter, Op, Key, undefined}
-    %%         end;
-    %%     Op =:= "PUT" ->
-    %%         case bitcask:put(DBHandle, BinaryKey, BinaryVal) of
-    %%             ok ->
-    %%                 io:format("Handle io Key: ~p, Value: ~p ~n", [Key, Val]),
-    %%                 Parent ! {child, RequestCounter, Op, Key, Val};
-    %%             {error, _} ->
-    %%                 io:format("error: Key: ~p, Value: ~p ~n", [Key, Val]),
-    %%                 Parent ! {child, RequestCounter, Op, Key, error}
-    %%         end;
-    %%     true -> Parent ! {child, RequestCounter, Op, Key, Val}
-    %% end.
+    if 
+        Op =:= "GET" ->
+            case bitcask:get(DBHandle, BinaryKey) of
+                {ok, Value} ->
+                    io:format("Handle io Key: ~p Value: ~p~n", [Key, Value]),
+                    Parent ! {RequestCounter, Op, Key, Value};
+                not_found ->
+                    io:format("Handle ioKey: ~p Value: ~p~n", [Key, not_found]),
+                    Parent ! {RequestCounter, Op, Key, undefined}
+            end;
+        Op =:= "PUT" ->
+            case bitcask:put(DBHandle, BinaryKey, BinaryVal) of
+                ok ->
+                    io:format("Handle io Key: ~p, Value: ~p ~n", [Key, Val]),
+                    Parent ! {RequestCounter, Op, Key, Val};
+                {error, _} ->
+                    io:format("error: Key: ~p, Value: ~p ~n", [Key, Val]),
+                    Parent ! {RequestCounter, Op, Key, error}
+            end;
+        true -> Parent ! {RequestCounter, Op, Key, Val}
+    end.
 
 start_procs(Port) ->
     listen_to_clients(Port).
@@ -120,7 +117,6 @@ listen_to_nodes(Arbiter, Port) ->
 
 node_loop(Arbiter, Socket, RequestMap, RequestCounter) ->
     inet:setopts(Socket, [{active, once}]),
-
     receive
         {udp, Socket, Host, Port, Bin} ->
             io:format("Received data `~p` `~p` from `~p`~n", [Host, Port, Bin]),
@@ -130,7 +126,7 @@ node_loop(Arbiter, Socket, RequestMap, RequestCounter) ->
             io:format("node_loop pid: ~p~n", [self()]),
             node_loop(Arbiter, Socket, NewRequestMap, RequestCounter + 1);
         {arbiter, Counter, Method, Key, Val} ->
-            io:format('Sending Response to node'),
+            io:format('Sending Response to node~n'),
             {Host, Port} = maps:get(Counter, RequestMap),
             NewRequestMap = maps:remove(Counter, RequestMap),
             gen_udp:send(Socket, Host, Port, request_pb:encode({request, Method, Key, Val})),
