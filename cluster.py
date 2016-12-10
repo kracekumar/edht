@@ -53,8 +53,10 @@ async def run_command(config_file, option="shell"):
     with open(bash_file, 'w') as f:
         f.write(FORMAT)
     process = subprocess.Popen(['bash', bash_file], stdout=subprocess.PIPE)
-    async for line in process.stdout:
-        print('{}:'.format(config_file), line.decode('ascii'), end='')
+    with open('log.log', 'a') as f:
+        async for line in process.stdout:
+            #f.write('{}:{}'.format(config_file, line.decode('ascii')))
+            print('{}:{}'.format(config_file, line.decode('ascii')), end='')
 
 
 async def main(total_nodes):
@@ -77,7 +79,6 @@ async def main(total_nodes):
 
 
 if __name__ == "__main__":
-    print(sys.argv)
     if len(sys.argv) >=2:
         try:
             total_nodes = int(sys.argv[1])
