@@ -52,11 +52,13 @@ async def run_command(config_file, option="shell"):
     bash_file = config_file.split('.')[0] + '.sh'
     with open(bash_file, 'w') as f:
         f.write(FORMAT)
-    process = subprocess.Popen(['bash', bash_file], stdout=subprocess.PIPE)
-    with open('log.log', 'a') as f:
+    try:
+        process = subprocess.Popen(['bash', bash_file], stdout=subprocess.PIPE)
         async for line in process.stdout:
-            #f.write('{}:{}'.format(config_file, line.decode('ascii')))
             print('{}:{}'.format(config_file, line.decode('ascii')), end='')
+    except:
+        print('Received KeyboardInterrupt, terminating {}'.format(process._popen.args))
+        process.terminate()
 
 
 async def main(total_nodes):
@@ -74,8 +76,11 @@ async def main(total_nodes):
             run_command(config_file=conf_files[i]))
         tasks.append(task)
 
-    for task in tasks:
-        await task.join()
+    try:
+        for task in tasks:
+            await task.join()
+    except:
+        pass
 
 
 if __name__ == "__main__":
@@ -87,4 +92,7 @@ if __name__ == "__main__":
             exit(1)
     else:
         total_nodes = 3
-    curio.run(main(total_nodes=total_nodes))
+    try:
+        curio.run(main(total_nodes=total_nodes))
+    except:
+        print('shutting down')
