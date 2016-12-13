@@ -48,8 +48,9 @@ init([]) ->
     spawn_link(fun() -> start_procs() end),
     % Arbiter which handles local io
     Arbiter = spawn_link(fun() -> local_io(0) end),
+    register(arbiter, Arbiter),
     % listen to internode communication
-    spawn_link(fun() -> listen_to_nodes(Arbiter) end),
+    spawn_link(fun() -> listen_to_nodes() end),
     % proc to keep track of nodes
     NodeIPs = get_config(?NODE_IPS),
     io:format("Node IPs: ~p~n", [NodeIPs]),
@@ -66,6 +67,7 @@ pick(Pair, Acc, ConfigItemTypeMap) ->
     Fun = maps:get(Key, ConfigItemTypeMap),
     maps:put(Key, Fun(Val), Acc).
 
+%% Process which return config values to other process
 config_manager(Map) ->
     receive
         {From, Key} ->
@@ -73,13 +75,16 @@ config_manager(Map) ->
             config_manager(Map)
     end.
 
+%% Config value coordinator
 get_config(Key) ->
+    %% Function internally calls config_manager to pull the config value
     config_manager ! {self(), Key},
     receive
         Val ->
             Val
     end.
 
+%% Convert IP:Port string into {Host, Port}
 ip_string_to_tuple(Str) ->
     Token = string:tokens(Str, ":"),
     Octets = string:tokens(hd(Token), "."),
@@ -91,6 +96,7 @@ convert_ips_to_tuple(IPString) ->
     IPList = string:tokens(IPString, ","),
     lists:map(fun(IP) -> ip_string_to_tuple(IP) end, IPList).
 
+%% Erlang process responsible for key node lookup
 node_hash_lookup(NodeRing) ->
     %% Function to keep track of ring and return node[s] responsible for the key
     receive
@@ -100,6 +106,7 @@ node_hash_lookup(NodeRing) ->
             node_hash_lookup(NodeRing)
         end.
 
+%% Peristance/lookup from stored file
 local_io(Ref) ->
     receive
         {Caller, RequestCounter, Op, Key, Val} ->
@@ -114,25 +121,32 @@ local_io(Ref) ->
         Pat -> io:format("failed the pattern, ~p ~n", [Pat])
         end.
 
-handle_io(Parent, RequestCounter, Op, Key, Val) ->
-    DBHandle = open_store(),
+handle_node_get(Parent, DBHandle, RequestCounter, Key) ->
+    BinaryKey = to_binary(Key),
+    case bitcask:get(DBHandle, BinaryKey) of
+        {ok, Value} ->
+            Parent ! {RequestCounter, "GET", Key, Value};
+        not_found ->
+            Parent ! {RequestCounter, "GET", Key, undefined}
+    end.
+
+handle_node_put(Parent, DBHandle, RequestCounter, Key, Val) ->
     BinaryKey = to_binary(Key),
     BinaryVal = to_binary(Val),
+    case bitcask:put(DBHandle, BinaryKey, BinaryVal) of
+        ok ->
+            Parent ! {RequestCounter, "PUT", Key, Val};
+        {error, _} ->
+            Parent ! {RequestCounter, "PUT", Key, error}
+    end.
+
+handle_io(Parent, RequestCounter, Op, Key, Val) ->
+    DBHandle = open_store(),
     if 
         Op =:= "GET" ->
-            case bitcask:get(DBHandle, BinaryKey) of
-                {ok, Value} ->
-                    Parent ! {RequestCounter, Op, Key, Value};
-                not_found ->
-                    Parent ! {RequestCounter, Op, Key, undefined}
-            end;
+            handle_node_get(Parent, DBHandle, RequestCounter, Key);
         Op =:= "PUT" ->
-            case bitcask:put(DBHandle, BinaryKey, BinaryVal) of
-                ok ->
-                    Parent ! {RequestCounter, Op, Key, Val};
-                {error, _} ->
-                    Parent ! {RequestCounter, Op, Key, error}
-            end;
+            handle_node_put(Parent, DBHandle, RequestCounter, Key, Val);
         true -> Parent ! {RequestCounter, Op, Key, Val}
     end,
     bitcask:close(DBHandle).
@@ -148,21 +162,22 @@ read_config() ->
     econfig:get_value(config, "DEFAULT").
 
 open_store() ->
-    bitcask:open(?DATADIR, [read_write]).
+    Dir = ?DATADIR ++ get_config(?NAME),
+    bitcask:open(Dir, [read_write]).
 
 
 listen_to_clients(Port) ->
     %% Listen to all UDP clients.
     spawn_link(fun() -> handle_client_connections(Port) end).
 
-listen_to_nodes(Arbiter) ->
+listen_to_nodes() ->
     Port = get_config(?NODE_PORT),
     {ok, Socket} = gen_udp:open(Port, [binary, {active, false}]),
     io:format("Listening to node port ~p~n", [Port]),
-    node_loop(Arbiter, Socket, maps:new(), 0).
+    node_loop(Socket, maps:new(), 0).
 
 
-node_loop(Arbiter, Socket, RequestMap, RequestCounter) ->
+node_loop(Socket, RequestMap, RequestCounter) ->
     inet:setopts(Socket, [{active, once}]),
     receive
         {udp, Socket, Host, Port, Bin} ->
@@ -170,14 +185,14 @@ node_loop(Arbiter, Socket, RequestMap, RequestCounter) ->
             io:format("Received data from node {~p, ~p} on ~p, Method: `~p`, Key: `~p`, Val: `~p`~n", 
                       [Host, Port, get_config(?NODE_PORT), Method, Key, Value]),
             NewRequestMap = maps:put(RequestCounter, {Host, Port}, RequestMap),
-            Arbiter ! {self(), RequestCounter, Method, Key, Value},
-            node_loop(Arbiter, Socket, NewRequestMap, RequestCounter + 1);
+            arbiter ! {self(), RequestCounter, Method, Key, Value},
+            node_loop(Socket, NewRequestMap, RequestCounter + 1);
         {arbiter, Counter, Method, Key, Val} ->
             io:format('Sending Response to node, Key: ~p, Val: ~p~n', [Key, Val]),
             {Host, Port} = maps:get(Counter, RequestMap),
             NewRequestMap = maps:remove(Counter, RequestMap),
             gen_udp:send(Socket, Host, Port, request_pb:encode({request, Method, Key, Val})),
-            node_loop(Arbiter, Socket, NewRequestMap, RequestCounter)
+            node_loop(Socket, NewRequestMap, RequestCounter)
     end.
 
 
@@ -200,7 +215,8 @@ client_loop(Socket) ->
 
     receive
         {udp, Socket, Host, Port, Bin} ->
-            io:format("Received data `~p` `~p` from `~p`~n", [Host, Port, Bin]),
+            io:format('----------------~n'),
+            io:format("Received data: ~p from `~p` `~p` on `~p`~n", [Bin, Host, Port, get_config(?CLIENT_PORT)]),
             {_, Method, Key, Value} = request_pb:decode_request(Bin),
             spawn_link(fun() -> handle_request(Socket, Host, Port, Method, to_binary(Key), to_binary(Value), Bin) end),
             % Spawn new Proc to send data back?
@@ -225,8 +241,8 @@ listen_to_lookup_response() ->
 
 handle_local_connection(Method, Socket, Host, Port, Key, Value) ->
     if 
-        Method =:= "GET" -> spawn_link(fun() -> handle_get(Socket, Host, Port, Key) end);
-        Method =:= "PUT" -> spawn_link(fun() -> handle_put(Socket, Host, Port, Key, Value) end);
+        Method =:= "GET" -> spawn_link(fun() -> handle_client_get(Socket, Host, Port, Key) end);
+        Method =:= "PUT" -> spawn_link(fun() -> handle_client_put(Socket, Host, Port, Key, Value) end);
         true -> spawn_link(fun() -> handle_rogue_msg(Socket, Host, Port, Method, Key, Value) end)
     end.
 
@@ -261,7 +277,7 @@ handle_rogue_msg(Socket, Host, Port, Method, Key, Value) ->
     gen_udp:send(Socket, Host, Port, request_pb:encode({request, Method, Key, Value})).
 
 
-handle_get(Socket, Host, Port, Key) ->
+handle_client_get(Socket, Host, Port, Key) ->
     DBHandle = open_store(),
     case bitcask:get(DBHandle, Key) of
         {ok, Value} ->
@@ -274,7 +290,7 @@ handle_get(Socket, Host, Port, Key) ->
     end,
     bitcask:close(DBHandle).
 
-handle_put(Socket, Host, Port, Key, Value) ->
+handle_client_put(Socket, Host, Port, Key, Value) ->
     DBHandle = open_store(),
     case bitcask:put(DBHandle, Key, Value) of
         ok ->
