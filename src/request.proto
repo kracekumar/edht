@@ -1,5 +1,10 @@
-message Request{
-  required string type = 1;
+message ClientRequest {
+  required string method = 1;  // GET, PUT
   required string key = 2;
   optional string val = 3;
+}
+
+message NodeRequest {
+  required string type = 1;  // FORWARD, REPLICATE, REHASH(?)
+  required ClientRequest data = 2;
 }

@@ -20,7 +20,7 @@ def generate_env_variables(client_port=6000, node_port=7000, total_nodes=3):
     node_names = ['edht-{}'.format(i+1) for i in range(total_nodes)]
     return {'client_ports': client_ports, 'node_ports': node_ports,
             'node_ips': node_ips, 'node_names': node_names,
-            'replication': 3}
+            'replication': 3, 'node_timeout_ms': 5000}
 
 
 def create_config_files(variables, base_path='config'):
