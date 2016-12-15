@@ -14,7 +14,10 @@ erl_crash.dump
 logs
 _build
 .idea
+*.hrl
+
+venv
 
 # bitcask data
-.bitcaskdata
+.bitcaskdata*
 rebar3
