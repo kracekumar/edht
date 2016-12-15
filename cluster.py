@@ -19,7 +19,8 @@ def generate_env_variables(client_port=6000, node_port=7000, total_nodes=3):
     # + 1 to start node name from 1
     node_names = ['edht-{}'.format(i+1) for i in range(total_nodes)]
     return {'client_ports': client_ports, 'node_ports': node_ports,
-            'node_ips': node_ips, 'node_names': node_names}
+            'node_ips': node_ips, 'node_names': node_names,
+            'replication': 3}
 
 
 def create_config_files(variables, base_path='config'):
@@ -84,6 +85,7 @@ async def main(total_nodes):
 
 
 if __name__ == "__main__":
+    print('Current PID of the process: {}'.format(os.getpid()))
     if len(sys.argv) >=2:
         try:
             total_nodes = int(sys.argv[1])

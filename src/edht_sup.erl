@@ -19,6 +19,7 @@
 -define(NODE_PORT, "node_port").
 -define(NODE_IPS, "node_ips").
 -define(NAME, "name").
+-define(REPLICATION, "replication").
 
 %%====================================================================
 %% API functions
@@ -40,6 +41,7 @@ init([]) ->
     ConfigItemTypeMap = #{?CLIENT_PORT => fun list_to_integer/1, 
                           ?NODE_PORT => fun list_to_integer/1,
                           ?NODE_IPS => fun convert_ips_to_tuple/1,
+                          ?REPLICATION => fun list_to_integer/1,
                           ?NAME => fun(X) -> X end},
     Config = read_config(),
     Map = lists:foldl(fun(Pair, Acc) -> pick(Pair, Acc, ConfigItemTypeMap) end, maps:new(), Config),
@@ -319,7 +321,7 @@ index_of(Value, List) ->
         false -> notfound
     end.
 
-
+%% Helper functions to test during development
 client(Method, Key, Value) ->
     {ok, Socket} = gen_udp:open(8888),
     gen_udp:send(Socket, {127,0,0,1}, 4545, request_pb:encode(
