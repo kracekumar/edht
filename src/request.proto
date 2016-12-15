@@ -5,6 +5,7 @@ message ClientRequest {
 }
 
 message NodeRequest {
-  required string type = 1;  // FORWARD, REPLICATE, REHASH(?)
+  // FORWARD_{REQ, RESP}, REPLICA_{REQ, RESP}, REHASH_{REQ, RESP}(?)
+  required string type = 1;
   required ClientRequest data = 2;
 }

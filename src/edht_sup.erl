@@ -206,20 +206,59 @@ unpack_node_request(NodeRequest) ->
         }
     }.
 
-
 handle_node_request(Socket, Host, Port, NodeRequest) ->
     {Type, {Method, Key, Value}} = unpack_node_request(NodeRequest),
+
+    case Type of
+        "FORWARD_REQ" ->
+            % this node is the coordinator for replication; send replica requests to other
+            handle_forward_request(Socket, Host, Port, NodeRequest);
+        "FORWARD_RESP" ->
+            % This node is not in the replica list: send info back to client
+            handle_forward_resp;
+        "REPLICA_REQ" ->
+            % this node is a replica
+            handle_replica_request(Socket, Host, Port, NodeRequest);
+        "REPLICA_RESP" ->
+            % this node is the coordinator; collect this and count it
+            handle_replica_response()
+    end,
 
     %% write to disk (arbiter)
     arbiter ! {self(), Method, Key, Value},
 
     %% send replicate requests to N - 1 nodes
-
     receive
         {arbiter, ResponseMethod, ResponseKey, ResponseVal} ->
             io:format('Sending Response to node, Key: ~p, Val: ~p~n', [ResponseKey, ResponseVal]),
             gen_udp:send(Socket, Host, Port, request_pb:encode({clientrequest, ResponseMethod, ResponseKey, ResponseVal}))
     end.
+
+response_type(RequestType) ->
+    case RequestType of
+        "FORWARD_REQ" -> "FORWARD_RESP";
+        "REPLICA_REQ" -> "REPLICA_RESP"
+    end.
+
+handle_forward_request(Socket, Host, Port, NodeRequest) ->
+    %% send requests to replicas in successor list
+
+
+
+handle_replica_request(Socket, SourceHost, SourcePort, NodeRequest) ->
+    ?P("~p/~p: ~p, ~p, ~p", [?FUNCTION_NAME, ?FUNCTION_ARITY, SourceHost, SourcePort, NodeRequest]),
+    {RequestType, {Method, Key, Value}} = unpack_node_request(NodeRequest),
+
+    arbiter ! {self(), Method, Key, Value},
+    receive
+        {arbiter, ResponseMethod, ResponseKey, ResponseVal} ->
+            io:format('Sending Response to node, Key: ~p, Val: ~p~n', [ResponseKey, ResponseVal]),
+
+            % respond to the coordinator
+            gen_udp:send(Socket, SourceHost, SourcePort,
+                request_pb:encode({noderequest, response_type(RequestType), {clientrequest, ResponseMethod, ResponseKey, ResponseVal}}))
+    end.
+
 
 client_listener_loop(Port) ->
     {ok, Socket} = gen_udp:open(Port, [binary, {active, false}]),
