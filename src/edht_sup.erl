@@ -23,7 +23,7 @@
 -define(NODE_IPS, "node_ips").
 -define(NAME, "name").
 -define(REPLICATION, "replication").
--define(NODE_TIMEOUT_MS, "nod_timeout_ms").
+-define(NODE_TIMEOUT_MS, "node_timeout_ms").
 
 -record(client_request, {method, key, value=undefined}).
 -record(node_request, {type, client_request}).
@@ -237,9 +237,6 @@ handle_node_request(Socket, Host, Port, NodeRequest) ->
         %%     % this node is the coordinator; collect this and count it
         %%     handle_replica_response()
     end,
-
-    %% write to disk (arbiter)
-    
 
     %% send replicate requests to N - 1 nodes
     receive
