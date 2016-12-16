@@ -31,3 +31,4 @@ TODO
 ----
 - [ ] Error handling in general
 - [ ] Meaningful response for bad client requests
+- [ ] Specify bind address for node listeners in config file

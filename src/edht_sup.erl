@@ -117,7 +117,10 @@ node_hash_lookup(NodeRing) ->
         {From, lookup, Key} ->
             Node = concha:lookup(Key, NodeRing),
             From ! {lookup, Key, Node, self()},
-            node_hash_lookup(NodeRing)
+            node_hash_lookup(NodeRing);
+        {From, successor, Key, Length} ->
+            Nodes = successor(NodeRing, Key, Length),
+            From ! {successor, Nodes}
         end.
 
 %% Peristance/lookup from stored file
@@ -206,26 +209,37 @@ unpack_node_request(NodeRequest) ->
         }
     }.
 
+pack_client_request(ClientRequest) ->
+    {Method, Key, Val} = ClientRequest,
+    {clientrequest, Method, Key, Val}.
+
+encode_node_request(Type, Status, ClientRequests) ->
+    ClientRequests = lists:filter(fun(X)-> X =/= {error} end, ClientRequests),
+    Resps = lists:map(fun(X) -> pack_client_request(X) end, ClientRequests),
+    request_pb:encode({node_request, Type, Status, Resps}).
+
 handle_node_request(Socket, Host, Port, NodeRequest) ->
     {Type, {Method, Key, Value}} = unpack_node_request(NodeRequest),
 
     case Type of
         "FORWARD_REQ" ->
             % this node is the coordinator for replication; send replica requests to other
+            arbiter ! {self(), Method, Key, Value},
             handle_forward_request(Socket, Host, Port, NodeRequest);
         "FORWARD_RESP" ->
             % This node is not in the replica list: send info back to client
-            handle_forward_resp;
+            handle_forward_response(Socket, Host, Port, NodeRequest);
         "REPLICA_REQ" ->
             % this node is a replica
-            handle_replica_request(Socket, Host, Port, NodeRequest);
-        "REPLICA_RESP" ->
-            % this node is the coordinator; collect this and count it
-            handle_replica_response()
+            arbiter ! {self(), Method, Key, Value},
+            handle_replica_request(Socket, Host, Port, NodeRequest)
+        %% "REPLICA_RESP" ->
+        %%     % this node is the coordinator; collect this and count it
+        %%     handle_replica_response()
     end,
 
     %% write to disk (arbiter)
-    arbiter ! {self(), Method, Key, Value},
+    
 
     %% send replicate requests to N - 1 nodes
     receive
@@ -240,10 +254,74 @@ response_type(RequestType) ->
         "REPLICA_REQ" -> "REPLICA_RESP"
     end.
 
+serialize_node_request(NodeRequest) ->
+    {RequestType, {Method, Key, Val}} = unpack_node_request(NodeRequest),
+    request_pb:encode({noderequest, response_type(RequestType), {clientrequest, Method, Key, Val}}).
+
+deserialize_node_response(Bin) ->
+    {_, Type, {_, Method, Key, Val}} = request_pb:decode_noderequest(Bin),
+    {ok, Type, {Method, Key, Val}}.
+
+send_replica_request(From, ReplicaNode, SerializedNodeRequest) ->
+    {Host, Port} = ReplicaNode,
+    {ok, Socket} = gen_udp:open(0, [binary]),
+    gen_udp:send(Socket, Host, Port, SerializedNodeRequest),
+    TimeOut = get_config(?NODE_TIMEOUT_MS),
+    receive
+        {udp, _, _, _, Bin} ->
+            From ! {deserialize_node_response(Bin)}
+    after
+        TimeOut ->
+            ?P("Timeout for request to ~p:~p~n", [Host, Port]),
+            {error}
+    end.
+
+coordinate_replicas_recurse(Counter, Acc) ->
+    receive
+        Data ->
+            if 
+                Counter == 0 -> [Data | Acc];
+                true -> coordinate_replicas_recurse(Counter - 1, [Data | Acc])
+            end
+    end.
+
+coordinate_replicas(ReplicaNodes, NodeRequest) ->
+    SerializedNodeRequest = serialize_node_request(NodeRequest),
+    From = self(),
+    Counter = length(ReplicaNodes),
+    lists:map(fun(ReplicaNode) -> spawn_link(fun() -> send_replica_request(From, ReplicaNode, SerializedNodeRequest) end)
+              end, ReplicaNodes),
+    coordinate_replicas_recurse(Counter, []).
+
 handle_forward_request(Socket, Host, Port, NodeRequest) ->
     %% send requests to replicas in successor list
+    Key = NodeRequest#node_request.client_request#client_request.key,
+    Length = get_config(?REPLICATION),
+    NodeIPPortPair = {{127, 0, 0, 1}, get_config(?NODE_PORT)},
+    node_hash_lookup ! {self(), successor, Length},
+    receive
+        {successor, Nodes} ->
+            ReplicaNodes = lists:filter(fun(X) -> X =/= NodeIPPortPair end, Nodes),
+            Responses = coordinate_replicas(ReplicaNodes, NodeRequest),
+            Status = request_status(Responses),
+            Data = encode_node_request("FORWARD_RESP", Status, Responses),
+            gen_udp:send(Socket, Host, Port, Data),
+            gen_udp:close(Socket)
+    end.
 
+handle_forward_response(Socket, Host, Port, NodeRequest) ->
+    %% Handle forward response
+    gen_udp:send(Socket, Host, Port, NodeRequest),
+    gen_udp:close(Socket).
 
+request_status(Responses) ->
+    %% Check all the response is success or not.
+    case lists:any(fun(Resp) -> Resp =:= {error} end, Responses) of
+        true ->
+            "success";
+        false ->
+            "failure"
+    end.
 
 handle_replica_request(Socket, SourceHost, SourcePort, NodeRequest) ->
     ?P("~p/~p: ~p, ~p, ~p", [?FUNCTION_NAME, ?FUNCTION_ARITY, SourceHost, SourcePort, NodeRequest]),
@@ -259,6 +337,8 @@ handle_replica_request(Socket, SourceHost, SourcePort, NodeRequest) ->
                 request_pb:encode({noderequest, response_type(RequestType), {clientrequest, ResponseMethod, ResponseKey, ResponseVal}}))
     end.
 
+handle_replica_response() ->
+    1.
 
 client_listener_loop(Port) ->
     {ok, Socket} = gen_udp:open(Port, [binary, {active, false}]),
