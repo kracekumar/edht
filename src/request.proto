@@ -7,6 +7,7 @@ message ClientRequest {
 message NodeRequest {
   // FORWARD_{REQ, RESP}, REPLICA_{REQ, RESP}, REHASH_{REQ, RESP}(?)
   required string type = 1;
+  // SUCCESS/ERROR
   optional string status = 2;
   repeated ClientRequest data = 3;
 }

@@ -20,7 +20,7 @@ def generate_env_variables(client_port=6000, node_port=7000, total_nodes=3):
     node_names = ['edht-{}'.format(i+1) for i in range(total_nodes)]
     return {'client_ports': client_ports, 'node_ports': node_ports,
             'node_ips': node_ips, 'node_names': node_names,
-            'replication': 3, 'node_timeout_ms': 5000}
+            'replication': "3", 'node_timeout_ms': "10000"}
 
 
 def create_config_files(variables, base_path='config'):
@@ -33,6 +33,8 @@ def create_config_files(variables, base_path='config'):
         config['DEFAULT']['node_port'] = str(variables['node_ports'][i])
         config['DEFAULT']['node_ips'] = ','.join(variables['node_ips'])
         config['DEFAULT']['name'] = variables['node_names'][i]
+        config['DEFAULT']['replication'] = variables['replication']
+        config['DEFAULT']['node_timeout_ms'] = variables['node_timeout_ms']
         filename = os.path.join(base_path, 'config_{}.ini'.format(i + 1))
         with open(filename, 'w') as conf_file:
             config.write(conf_file)

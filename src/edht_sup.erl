@@ -40,8 +40,8 @@ start_link() ->
 %%====================================================================
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
-init([]) ->
-    io:format('Starting EDHT~n'),
+init(Args) ->
+    io:format('Starting EDHT with: ~p~n', [Args]),
     % load protobuf file for encoding and decoding
     protobuffs_compile:scan_file("src/request.proto"),
 
@@ -120,19 +120,20 @@ node_hash_lookup(NodeRing) ->
             node_hash_lookup(NodeRing);
         {From, successor, Key, Length} ->
             Nodes = successor(NodeRing, Key, Length),
-            From ! {successor, Nodes}
+            From ! {successor, Nodes},
+            node_hash_lookup(NodeRing)
         end.
 
 %% Peristance/lookup from stored file
 arbiter_loop(Ref) ->
     receive
         {Caller, Op, Key, Val} ->
-            %io:format('Received data for lookup ~p, ~p, ~p~n', [Op, Key, Val]),
+            io:format('Received data for lookup ~p, ~p, ~p~n', [Op, Key, Val]),
             Parent = self(),
             spawn_link(fun() -> handle_io(Parent, Op, Key, Val) end),
             arbiter_loop(Caller);
         {Op, Key, Val} ->
-            %io:format('Sending data after lookup ~p, ~p, ~p~n', [Op, Key, Val]),
+            io:format('Sending data after lookup ~p, ~p, ~p~n', [Op, Key, Val]),
             Ref ! {arbiter, Op, Key, Val},
             arbiter_loop(Ref);
         Pat -> io:format("failed the pattern, ~p ~n", [Pat])
@@ -184,18 +185,25 @@ listen_to_nodes() ->
     io:format("Listening to node port ~p~n", [Port]),
     node_loop(Socket).
 
+spin_node_request_process(Data) ->
+    {Type, ClientRequest, Socket, Host, Port} = Data,
+    {Method, Key, Val} = ClientRequest,
+    NodeRequest = #node_request{type=Type, 
+                                client_request=#client_request{method=Method, key=Key, value=Val}
+                               },
+    spawn_link(fun() -> handle_node_request(Socket, Host, Port, NodeRequest) end).
+
 node_loop(Socket) ->
     inet:setopts(Socket, [{active, once}]),
     receive
         {udp, Socket, Host, Port, Bin} ->
-            {_, Type, {_, Method, Key, Value}} = request_pb:decode_noderequest(Bin),
-            NodeRequest = #node_request{type=Type,
-                client_request=#client_request{method=Method, key=Key, value=Value}},
+            {Type, Status, ClientRequests} = decode_node_request(Bin),
 
-            io:format("Received data from node {~p, ~p} on ~p, Method: `~p`, Key: `~p`, Val: `~p`~n",
-                      [Host, Port, get_config(?NODE_PORT), Type, Key, Value]),
+            io:format("Received data from node {~p, ~p} on ~p, Type: `~p`, Status: `~p`, Data: `~p`~n",
+                      [Host, Port, get_config(?NODE_PORT), Type, Status, ClientRequests]),
 
-            spawn_link(fun() -> handle_node_request(Socket, Host, Port, NodeRequest) end),
+            lists:map(fun(X) -> spin_node_request_process({Type, X, Socket, Host, Port}) end, 
+                      ClientRequests),
             node_loop(Socket)
     end.
 
@@ -210,19 +218,39 @@ unpack_node_request(NodeRequest) ->
     }.
 
 pack_client_request(ClientRequest) ->
-    {Method, Key, Val} = ClientRequest,
+    Size = tuple_size(ClientRequest),
+    case Size of
+        4 ->
+            % Response from aribiter
+            {_, Key, Method, Val} = ClientRequest;
+        3 ->
+            % Response from peers
+            {_, _, Rest} = ClientRequest,
+            {Key, Method, Val} = Rest
+    end,
     {clientrequest, Method, Key, Val}.
 
-encode_node_request(Type, Status, ClientRequests) ->
-    ClientRequests = lists:filter(fun(X)-> X =/= {error} end, ClientRequests),
+unpack_client_request(ClientRequest) ->
+    {_, Method, Key, Val} = ClientRequest,
+    {Method, Key, Val}.
+
+encode_node_request(Type, Status, Responses) ->
+    ClientRequests = lists:filter(fun(X)-> X =/= {"error"} end, Responses),
+    % ?P("Client Requests: ~p~n", [ClientRequests]),
     Resps = lists:map(fun(X) -> pack_client_request(X) end, ClientRequests),
-    request_pb:encode({node_request, Type, Status, Resps}).
+    request_pb:encode({noderequest, Type, Status, Resps}).
+
+decode_node_request(Data) ->
+    {_, Type, Status, NodeRequests} = request_pb:decode_noderequest(Data),
+    ClientRequests = lists:map(fun(X) -> unpack_client_request(X) end, NodeRequests),
+    {Type, Status, ClientRequests}.
 
 handle_node_request(Socket, Host, Port, NodeRequest) ->
+    ?P("NodeRequest: ~p~n", [NodeRequest]),
     {Type, {Method, Key, Value}} = unpack_node_request(NodeRequest),
-
+    ?P("Handle node request type ~p~n", [Type]),
     case Type of
-        "FORWARD_REQ" ->
+         "FORWARD_REQ" ->
             % this node is the coordinator for replication; send replica requests to other
             arbiter ! {self(), Method, Key, Value},
             handle_forward_request(Socket, Host, Port, NodeRequest);
@@ -232,45 +260,40 @@ handle_node_request(Socket, Host, Port, NodeRequest) ->
         "REPLICA_REQ" ->
             % this node is a replica
             arbiter ! {self(), Method, Key, Value},
-            handle_replica_request(Socket, Host, Port, NodeRequest)
-        %% "REPLICA_RESP" ->
-        %%     % this node is the coordinator; collect this and count it
-        %%     handle_replica_response()
-    end,
-
-    %% send replicate requests to N - 1 nodes
-    receive
-        {arbiter, ResponseMethod, ResponseKey, ResponseVal} ->
-            io:format('Sending Response to node, Key: ~p, Val: ~p~n', [ResponseKey, ResponseVal]),
-            gen_udp:send(Socket, Host, Port, request_pb:encode({clientrequest, ResponseMethod, ResponseKey, ResponseVal}))
+            handle_replica_request(Socket, Host, Port, NodeRequest);
+        true -> ?P("Failed~n")
     end.
 
 response_type(RequestType) ->
     case RequestType of
         "FORWARD_REQ" -> "FORWARD_RESP";
-        "REPLICA_REQ" -> "REPLICA_RESP"
+        "REPLICA_REQ" -> "REPLICA_RESP";
+        "FORWARD_RESP" -> "FORWARD_RESP"
     end.
 
 serialize_node_request(NodeRequest) ->
     {RequestType, {Method, Key, Val}} = unpack_node_request(NodeRequest),
-    request_pb:encode({noderequest, response_type(RequestType), {clientrequest, Method, Key, Val}}).
+    request_pb:encode({noderequest, response_type(RequestType), undefined, [{clientrequest, Method, Key, Val}]}).
 
 deserialize_node_response(Bin) ->
-    {_, Type, {_, Method, Key, Val}} = request_pb:decode_noderequest(Bin),
+    ?P("Deserializing node response: ~p~n", [Bin]),
+    {_, Type, Status, ClientRequests} = request_pb:decode_noderequest(Bin),
+    {_, Method, Key, Val} = hd(ClientRequests),
     {ok, Type, {Method, Key, Val}}.
 
 send_replica_request(From, ReplicaNode, SerializedNodeRequest) ->
     {Host, Port} = ReplicaNode,
     {ok, Socket} = gen_udp:open(0, [binary]),
+    ?P("Sending replica request ~p:~p~n", [Host, Port]),
     gen_udp:send(Socket, Host, Port, SerializedNodeRequest),
     TimeOut = get_config(?NODE_TIMEOUT_MS),
     receive
         {udp, _, _, _, Bin} ->
-            From ! {deserialize_node_response(Bin)}
+            From ! deserialize_node_response(Bin)
     after
         TimeOut ->
             ?P("Timeout for request to ~p:~p~n", [Host, Port]),
-            {error}
+            {"error"}
     end.
 
 coordinate_replicas_recurse(Counter, Acc) ->
@@ -292,32 +315,32 @@ coordinate_replicas(ReplicaNodes, NodeRequest) ->
 
 handle_forward_request(Socket, Host, Port, NodeRequest) ->
     %% send requests to replicas in successor list
+    ?P("handle forward request~n"),
     Key = NodeRequest#node_request.client_request#client_request.key,
     Length = get_config(?REPLICATION),
     NodeIPPortPair = {{127, 0, 0, 1}, get_config(?NODE_PORT)},
-    node_hash_lookup ! {self(), successor, Length},
+    node_hash_lookup ! {self(), successor, Key, Length},
     receive
         {successor, Nodes} ->
+            ?P("Peers for the requests: ~p~n", [Nodes]),
             ReplicaNodes = lists:filter(fun(X) -> X =/= NodeIPPortPair end, Nodes),
             Responses = coordinate_replicas(ReplicaNodes, NodeRequest),
             Status = request_status(Responses),
             Data = encode_node_request("FORWARD_RESP", Status, Responses),
-            gen_udp:send(Socket, Host, Port, Data),
-            gen_udp:close(Socket)
+            gen_udp:send(Socket, Host, Port, Data)
     end.
 
 handle_forward_response(Socket, Host, Port, NodeRequest) ->
     %% Handle forward response
-    gen_udp:send(Socket, Host, Port, NodeRequest),
-    gen_udp:close(Socket).
+    gen_udp:send(Socket, Host, Port, serialize_node_request(NodeRequest)).
 
 request_status(Responses) ->
     %% Check all the response is success or not.
-    case lists:any(fun(Resp) -> Resp =:= {error} end, Responses) of
+    case lists:any(fun(Resp) -> Resp =:= {"error"} end, Responses) of
         true ->
-            "success";
+            "failure";
         false ->
-            "failure"
+            "success"
     end.
 
 handle_replica_request(Socket, SourceHost, SourcePort, NodeRequest) ->
@@ -331,11 +354,9 @@ handle_replica_request(Socket, SourceHost, SourcePort, NodeRequest) ->
 
             % respond to the coordinator
             gen_udp:send(Socket, SourceHost, SourcePort,
-                request_pb:encode({noderequest, response_type(RequestType), {clientrequest, ResponseMethod, ResponseKey, ResponseVal}}))
+                request_pb:encode({noderequest, response_type(RequestType), 
+                                   {clientrequest, ResponseMethod, ResponseKey, ResponseVal}}))
     end.
-
-handle_replica_response() ->
-    1.
 
 client_listener_loop(Port) ->
     {ok, Socket} = gen_udp:open(Port, [binary, {active, false}]),
@@ -355,18 +376,20 @@ client_loop(Socket) ->
     inet:setopts(Socket, [binary, {active, once}]),
 
     receive
-        {udp, Socket, Host, Port, RawData} ->
+        {udp, ClientSocket, ClientHost, ClientPort, RawData} ->
             io:format('----------------~n'),
-            io:format("Received data: ~p from `~p` `~p` on `~p`~n", [RawData, Host, Port, get_config(?CLIENT_PORT)]),
             {_, Method, Key, Value} = request_pb:decode_clientrequest(RawData),
             ClientRequest = #client_request{
                 method=Method,
                 key=Key,
                 value=Value
             },
-
-            spawn_link(fun() -> handle_client_request(Socket, Host, Port, ClientRequest) end),
-            % Spawn new Proc to send data back?
+            io:format("Received data: ~p from `~p` `~p` on `~p`~n", 
+                      [ClientRequest, ClientHost, ClientPort, get_config(?CLIENT_PORT)]),
+            spawn_link(fun() -> handle_client_request(
+                                  ClientSocket, ClientHost, ClientPort, ClientRequest) 
+                       end),
+            ?P("Socket: ~p, Client Socket: ~p~n", [Socket, ClientSocket]),
             client_loop(Socket)
     end.
 
@@ -385,62 +408,68 @@ listen_to_lookup_response() ->
         Any -> io:format("Any ~p~n", [Any])
     end.
 
-unpack_client_request(ClientRequest) ->
+unpack_client_request_as_tuple(ClientRequest) ->
     Method = ClientRequest#client_request.method,
     Key = ClientRequest#client_request.key,
     Value = ClientRequest#client_request.value,
     {Method, Key, Value}.
 
-handle_local_connection(Socket, Host, Port, ClientRequest) ->
+handle_local_connection(ClientSocket, ClientHost, ClientPort, ClientRequest) ->
     {Method, Key, Value} = unpack_client_request(ClientRequest),
-
-    if 
-        Method =:= "GET" -> spawn_link(fun() -> handle_client_get(Socket, Host, Port, Key) end);
-        Method =:= "PUT" -> spawn_link(fun() -> handle_client_put(Socket, Host, Port, Key, Value) end);
-        true -> spawn_link(fun() -> handle_rogue_msg(Socket, Host, Port, Method, Key, Value) end)
+    case Method of
+        "GET" -> spawn_link(fun() -> handle_client_get(
+                                                  ClientSocket, ClientHost, ClientPort, Key) end);
+        "PUT" -> spawn_link(fun() -> handle_client_put(
+                                                  ClientSocket, ClientHost, ClientPort, Key, Value) end);
+        true -> spawn_link(fun() -> handle_rogue_msg(
+                                      ClientSocket, ClientHost, ClientPort, Method, Key, Value) end)
     end.
 
-handle_remote_connection(Socket, Host, Port, NodeHost, NodePort, RawData) ->
-    spawn_link(fun() -> handle_remote_connection_inner(Socket, Host, Port, NodeHost, NodePort, RawData) end).
+handle_remote_connection(ClientSocket, ClientHost, ClientPort, NodeHost, NodePort, RawData) ->
+    spawn_link(fun() -> handle_remote_connection_inner(
+                          ClientSocket, ClientHost, ClientPort, NodeHost, NodePort, RawData)
+               end).
 
-handle_remote_connection_inner(Socket, Host, Port, NodeHost, NodePort, ClientRequest) ->
+handle_remote_connection_inner(ClientSocket, ClientHost, ClientPort, NodeHost, NodePort, ClientRequest) ->
     % If the port number is 0, OS chooses the port for the connection.
     {ok, NodeSocket} = gen_udp:open(0, [binary]),
-
-    {Method, Key, Value} = unpack_client_request(ClientRequest),
-    ForwardRequestData = request_pb:encode({noderequest, "FORWARD", {clientrequest, Method, Key, Value}}),
-    io:format("noderequest data: ~p~n", [ForwardRequestData]),
-
-    gen_udp:send(NodeSocket, NodeHost, NodePort, ForwardRequestData),
+    {Method, Key, Value} = unpack_client_request_as_tuple(ClientRequest),
+    ForwardRequestData = request_pb:encode({noderequest, "FORWARD_REQ", undefined,
+                                            [{clientrequest, Method, Key, Value}]}),
+    io:format("Received data in ~p~n", [?FUNCTION_NAME]),
+    Res = gen_udp:send(NodeSocket, NodeHost, NodePort, ForwardRequestData),
+    ?P("Socket forward request ~p:~p status ~p~n", [NodeHost, NodePort, Res]),
     receive
         {udp, _, _, _, Response} ->
             io:format('Sending data to client: ~p~n', [Response]),
-            gen_udp:send(Socket, Host, Port, Response)
-    end,
-    gen_udp:close(NodeSocket).
+            gen_udp:send(ClientSocket, ClientHost, ClientPort, Response)
+    end.
 
-handle_client_request(Socket, Host, Port, ClientRequest) ->
+handle_client_request(ClientSocket, ClientHost, ClientPort, ClientRequest) ->
     Key = ClientRequest#client_request.key,
-
     node_hash_lookup ! {self(), lookup, Key},
     {NodeHost, NodePort} = listen_to_lookup_response(),
     CurNodePort = get_config(?NODE_PORT),
     if
         % TODO: Fix IP
         {NodeHost, NodePort} == {{127, 0, 0, 1}, CurNodePort} ->
-            handle_local_connection(Socket, Host, Port, ClientRequest);
+            NodeRequest = #node_request{type="FORWARD_REQ", 
+                                        client_request=ClientRequest},
+            handle_node_request(ClientSocket, ClientHost, ClientPort, NodeRequest);
+            %handle_local_connection(ClientSocket, ClientHost, ClientPort, ClientRequest);
         true ->
-            handle_remote_connection(Socket, Host, Port, NodeHost, NodePort, ClientRequest)
+            handle_remote_connection(
+              ClientSocket, ClientHost, ClientPort, NodeHost, NodePort, ClientRequest)
     end.
 
 handle_rogue_msg(Socket, Host, Port, Method, Key, Value) ->
     io:format('rogue'),
     gen_udp:send(Socket, Host, Port, request_pb:encode({clientrequest, Method, Key, Value})).
 
-
 handle_client_get(Socket, Host, Port, Key) ->
     DBHandle = open_store(),
-    case bitcask:get(DBHandle, Key) of
+    BinaryKey = to_binary(Key),
+    case bitcask:get(DBHandle, BinaryKey) of
         {ok, Value} ->
             io:format("Key: ~p Value: ~p~n", [Key, Value]),
             gen_udp:send(Socket, Host, Port, request_pb:encode({clientrequest, "GET", Key, Value}));
@@ -453,7 +482,9 @@ handle_client_get(Socket, Host, Port, Key) ->
 
 handle_client_put(Socket, Host, Port, Key, Value) ->
     DBHandle = open_store(),
-    case bitcask:put(DBHandle, Key, Value) of
+    BinaryKey = to_binary(Key),
+    BinaryValue = to_binary(Value),
+    case bitcask:put(DBHandle, BinaryKey, BinaryValue) of
         ok ->
             gen_udp:send(Socket, Host, Port, request_pb:encode({clientrequest, "PUT", Key, Value})),
             io:format("Key: ~p, Value: ~p ~n", [Key, Value]);
@@ -483,12 +514,13 @@ index_of(Value, List) ->
 %% Helper functions to test during development
 client(ServerHost, ServerPort, Method, Key, Value) ->
     {ok, Socket} = gen_udp:open(8888, [binary]),
-    gen_udp:send(Socket, ServerHost, ServerPort, request_pb:encode(
-                                              {clientrequest, Method, Key, Value})),
+    Res = gen_udp:send(Socket, ServerHost, ServerPort, request_pb:encode(
+                                                         {clientrequest, Method, Key, Value})),
+    ?P("Send socket rsp: ~p~n", [Res]),
     receive
         {udp, _, ServerHost, ServerPort, Response} ->
-            io:format("Response from Host: ~p, Port: ~p, Response: ~p~n", 
-                      [ServerHost, ServerPort, request_pb:decode_clientrequest(Response)])
+            io:format("Response from Host: ~p, Port: ~p, Response: ~p~n",
+                      [ServerHost, ServerPort, request_pb:decode_noderequest(Response)])
     after
         5000 ->
             io:format("Timed out listening for response from ~p:~p with request {~p, ~p, ~p}~n",
