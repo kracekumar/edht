@@ -85,7 +85,8 @@ pick(Pair, Acc, ConfigItemTypeMap) ->
 config_manager(Map) ->
     receive
         {From, Key} ->
-            From ! maps:get(Key, Map),
+            Val = maps:get(Key, Map),
+            From ! {config_manager, Val},
             config_manager(Map)
     end.
 
@@ -94,7 +95,7 @@ get_config(Key) ->
     %% Function internally calls config_manager to pull the config value
     config_manager ! {self(), Key},
     receive
-        Val ->
+        {config_manager, Val} ->
             Val
     end.
 
@@ -154,20 +155,27 @@ handle_node_put(Parent, DBHandle, Key, Val) ->
     case bitcask:put(DBHandle, BinaryKey, BinaryVal) of
         ok ->
             Parent ! {"PUT", Key, Val};
-        {error, _} ->
+        {error, Reason} ->
+            ?P("Put failed for key: ~p for ~p~n", [BinaryKey, Reason]),
             Parent ! {"PUT", Key, error}
     end.
 
 handle_io(Parent, Op, Key, Val) ->
-    DBHandle = open_store(),
-    if 
-        Op =:= "GET" ->
-            handle_node_get(Parent, DBHandle, Key);
-        Op =:= "PUT" ->
-            handle_node_put(Parent, DBHandle, Key, Val);
+    case Op of
+        "GET" ->
+            DBHandle = open_store(),
+            handle_node_get(Parent, DBHandle, Key),
+            bitcask:close(DBHandle);
+        "PUT" ->
+            DBHandle = open_store(),
+            % bitcask writes data to disk. Every key is mapped to one file.
+            % So updating same key across multiple process requires acquiring the lock.
+            % Inorder to handle atleast 100 requests or so for same key sleep is used.
+            timer:sleep(10),
+            handle_node_put(Parent, DBHandle, Key, Val),
+            bitcask:close(DBHandle);
         true -> Parent ! {Op, Key, Val}
-    end,
-    bitcask:close(DBHandle).
+    end.
 
 read_config() ->
     application:ensure_all_started(econfig),
