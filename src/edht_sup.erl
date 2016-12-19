@@ -7,15 +7,25 @@
 -behaviour(supervisor).
 
 %% API
--export([start_link/0]).
+-export([start_link/1]).
 -export([client/5]).
+-export([register_arbiter/0,
+         register_config_manager/1,
+         register_node_hash_lookup/1,
+         get_config/1,
+         handle_io/4]).
 
 %% Supervisor callbacks
 -export([init/1]).
 
 -define(SERVER, ?MODULE).
 -define(P, io:format).
-
+-define(ConfigItemTypeMap, #{?CLIENT_PORT => fun list_to_integer/1, 
+                             ?NODE_PORT => fun list_to_integer/1,
+                             ?NODE_IPS => fun convert_ips_to_tuple/1,
+                             ?REPLICATION => fun list_to_integer/1,
+                             ?NODE_TIMEOUT_MS => fun list_to_integer/1,
+                             ?NAME => fun(X) -> X end}).
 %% Node config keys
 -define(DATADIR, ".bitcaskdata").
 -define(CLIENT_PORT, "client_port").
@@ -32,8 +42,8 @@
 %% API functions
 %%====================================================================
 
-start_link() ->
-    supervisor:start_link({local, ?SERVER}, ?MODULE, []).
+start_link(Args) ->
+    supervisor:start_link({local, ?SERVER}, ?MODULE, Args).
 
 %%====================================================================
 %% Supervisor callbacks
@@ -45,22 +55,14 @@ init(Args) ->
     % load protobuf file for encoding and decoding
     protobuffs_compile:scan_file("src/request.proto"),
 
-    % read config for listening on different ports
-    ConfigItemTypeMap = #{?CLIENT_PORT => fun list_to_integer/1, 
-                          ?NODE_PORT => fun list_to_integer/1,
-                          ?NODE_IPS => fun convert_ips_to_tuple/1,
-                          ?REPLICATION => fun list_to_integer/1,
-                          ?NODE_TIMEOUT_MS => fun list_to_integer/1,
-                          ?NAME => fun(X) -> X end},
-    Config = read_config(),
-    Map = lists:foldl(fun(Pair, Acc) -> pick(Pair, Acc, ConfigItemTypeMap) end, maps:new(), Config),
-    register(config_manager, spawn_link(fun() -> config_manager(Map) end)),
+    {_, ConfigFile} = hd(Args),
+    register_config_manager(ConfigFile),
 
     % Start proc to listen to client
     spawn_link(fun() -> client_listener_loop(get_config(?CLIENT_PORT)) end),
 
     % Arbiter which handles local io
-    register(arbiter, spawn_link(fun() -> arbiter_loop(0) end)),
+    register_arbiter(),
 
     % listen to internode communication
     spawn_link(fun() -> listen_to_nodes() end),
@@ -75,6 +77,17 @@ init(Args) ->
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+register_arbiter() ->
+    register(arbiter, spawn_link(fun() -> arbiter_loop(0) end)).
+
+register_node_hash_lookup(NodeRing) ->
+    register(node_hash_lookup, spawn_link(fun() -> node_hash_lookup(NodeRing) end)).
+
+register_config_manager(ConfigFile) ->
+    Config = read_config(ConfigFile),
+    Map = lists:foldl(fun(Pair, Acc) -> pick(Pair, Acc, ?ConfigItemTypeMap) end, maps:new(), Config),
+    register(config_manager, spawn_link(fun() -> config_manager(Map) end)).
 
 pick(Pair, Acc, ConfigItemTypeMap) ->
     {Key, Val} = Pair,
@@ -177,10 +190,9 @@ handle_io(Parent, Op, Key, Val) ->
         true -> Parent ! {Op, Key, Val}
     end.
 
-read_config() ->
+read_config(ConfigFile) ->
     application:ensure_all_started(econfig),
-    File = os:getenv("CONFIG_FILE"),
-    econfig:register_config(config, [File]),
+    econfig:register_config(config, [ConfigFile]),
     econfig:get_value(config, "DEFAULT").
 
 open_store() ->
@@ -536,6 +548,12 @@ client(ServerHost, ServerPort, Method, Key, Value) ->
     end,
     gen_udp:close(Socket).
 
+udp_listen_and_return(Port) ->
+    {ok, Socket} = gen_udp:open(Port, [binary]),
+    receive
+        {udp, _, _, _, Data} ->
+            Data
+    end.
 
 %%====================================================================
 %% Private tests
@@ -557,9 +575,29 @@ index_of_member_test() ->
 
 successor_test() ->
     R = concha:new([1, 2, 3, 4]),
-    ?assertEqual(3, length(edht_sup:successor(R, "geoff", 3))).
+    ?assertEqual(3, length(successor(R, "geoff", 3))).
 
 fetch_n_nodes_test() ->
     R = concha:new([1, 2, 3, 4]),
     ?assertEqual([2, 3, 4], fetch_n_nodes(2, R, 3)).
+
+%% handle_io_get_test() ->
+%%     register_arbiter(),
+%%     From = self(),
+%%     arbiter ! {From, "GET", "The Trial", undefined},
+%%     receive
+%%         {arbiter, Op, Key, Val} ->
+%%             ?assertEqual({Op, Key, Val}, {"GET", "The Trial", undefined})
+%%     end.
+    
+%handle_io(Parent, Op, Key, Val)
+%% handle_client_put_test() ->
+%%     {ok, Socket} = gen_udp:open(0, [binary]),
+%%     Host = {127, 0, 0, 1},
+%%     Port = 8888,
+%%     handle_client_put(Socket, {127, 0, 0, 1}, Port, "the trial", "kafka"),
+%%     Data = udp_listen_and_return(),
+%%     ?assertEqual(Data, ).
+        
+%handle_client_put(Socket, Host, Port, Key, Value)
 -endif.

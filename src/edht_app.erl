@@ -16,7 +16,8 @@
 
 start(_StartType, _StartArgs) ->
     io:format('stating supervisor~n'),
-    edht_sup:start_link().
+    File = os:getenv("CONFIG_FILE"),
+    edht_sup:start_link([{config_file, File}]).
 
 %%--------------------------------------------------------------------
 stop(_State) ->
