@@ -1,3 +1,5 @@
+[![made at Recurse Center](https://cdn.rawgit.com/heatherbooker/made_at_rc/master/made_at_RC.svg)](https://www.recurse.com)
+
 edht
 =====
 
